@@ -289,21 +289,36 @@ def format_currency(x: int) -> str:
     return f"{int(x):,}원"
 
 
-def make_pie_chart(df: pd.DataFrame, label_col: str, value_col: str, title: str):
+def make_pie_chart(df, label_col, value_col, title):
     if df.empty:
         st.info(f"{title}: 표시할 데이터가 없습니다.")
         return
 
     fig, ax = plt.subplots(figsize=(8, 8))
 
+    n = len(df)
+
+    # 색상 수 늘리기
+    cmap = plt.get_cmap("tab20")
+    colors = [cmap(i % 20) for i in range(n)]
+
     pie_kwargs = {
         "x": df[value_col],
         "labels": df[label_col],
         "autopct": "%1.1f%%",
+        "colors": colors,
+        "startangle": 90,
+        "wedgeprops": {
+            "edgecolor": "black",
+            "linewidth": 1
+        }
     }
 
     if font_prop is not None:
-        pie_kwargs["textprops"] = {"fontproperties": font_prop, "fontsize": 11}
+        pie_kwargs["textprops"] = {
+            "fontproperties": font_prop,
+            "fontsize": 11
+        }
 
     ax.pie(**pie_kwargs)
 
