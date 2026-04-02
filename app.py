@@ -17,7 +17,7 @@ import easyocr
 
 st.set_page_config(page_title="토스 포트폴리오 자동 분석", layout="wide")
 
-FONT_PATH = "NanumGothic.ttf"
+FONT_PATH = "NanumGothic-Regular.ttf"
 HISTORY_FILE = "portfolio_history.csv"
 
 # =========================
