@@ -1,24 +1,37 @@
 import re
-import math
 import unicodedata
 from typing import List, Dict, Tuple, Optional
 
-import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import matplotlib
 from PIL import Image
 from rapidfuzz import process, fuzz
 import easyocr
 
 
-st.set_page_config(page_title="토스 포트폴리오 분석", layout="wide")
+st.set_page_config(page_title="토스 포트폴리오 자동 분석", layout="wide")
+
+# =========================
+# 한글 폰트 설정
+# =========================
+FONT_PATH = "NanumGothic-Regular.ttf"
+
+try:
+    font_prop = fm.FontProperties(fname=FONT_PATH)
+    matplotlib.rcParams["font.family"] = font_prop.get_name()
+except Exception:
+    font_prop = None
+
+matplotlib.rcParams["axes.unicode_minus"] = False
 
 
-# -----------------------------
-# 기본 설정
-# -----------------------------
+# =========================
+# 데이터 로드
+# =========================
 @st.cache_data
 def load_rules() -> pd.DataFrame:
     df = pd.read_csv("rules.csv")
@@ -31,6 +44,9 @@ def load_ocr_reader():
     return easyocr.Reader(["ko", "en"], gpu=False)
 
 
+# =========================
+# 유틸 함수
+# =========================
 def normalize_text(text: str) -> str:
     if text is None:
         return ""
@@ -70,13 +86,11 @@ def parse_amount(text: str) -> Optional[int]:
 
 def preprocess_image(pil_img: Image.Image) -> np.ndarray:
     img = np.array(pil_img)
-    if img.ndim == 2:
-        gray = img
-    else:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    gray = cv2.bilateralFilter(gray, 7, 50, 50)
-    gray = cv2.convertScaleAbs(gray, alpha=1.2, beta=8)
+    if img.ndim == 3:
+        gray = np.mean(img, axis=2).astype(np.uint8)
+    else:
+        gray = img.astype(np.uint8)
 
     return gray
 
@@ -133,7 +147,7 @@ def fuzzy_match_name(
     raw_name: str,
     key_to_official: Dict[str, str],
     official_names: List[str],
-    score_cutoff: int = 60
+    score_cutoff: int = 60,
 ) -> Optional[str]:
     raw_name = normalize_text(raw_name)
     if not raw_name:
@@ -149,7 +163,7 @@ def fuzzy_match_name(
         key,
         keys,
         scorer=fuzz.WRatio,
-        score_cutoff=score_cutoff
+        score_cutoff=score_cutoff,
     )
     if best is not None:
         matched_key = best[0]
@@ -159,7 +173,7 @@ def fuzzy_match_name(
         raw_name,
         official_names,
         scorer=fuzz.WRatio,
-        score_cutoff=score_cutoff
+        score_cutoff=score_cutoff,
     )
     if best2 is not None:
         return best2[0]
@@ -169,19 +183,23 @@ def fuzzy_match_name(
 
 def find_candidate_name_boxes(boxes: List[Dict]) -> List[Dict]:
     candidates = []
+    ignore_words = {
+        "보유", "총 자산", "주문 가능", "원", "주", "국내", "해외",
+        "ETF", "개별주", "내 투자", "신규 투자"
+    }
+
     for b in boxes:
         t = normalize_text(b["text"])
 
         if is_amount_text(t):
             continue
-
-        if t in ["보유", "총 자산", "주문 가능", "원", "주", "국내", "해외", "ETF", "개별주"]:
+        if t in ignore_words:
             continue
-
         if len(t) <= 1:
             continue
 
         candidates.append(b)
+
     return candidates
 
 
@@ -192,10 +210,8 @@ def find_candidate_amount_boxes(boxes: List[Dict]) -> List[Dict]:
         amt = parse_amount(t)
         if amt is None:
             continue
-
         if amt < 1000:
             continue
-
         candidates.append(b)
     return candidates
 
@@ -213,16 +229,13 @@ def pair_names_and_amounts(
         best_score = -1
 
         for nb in name_boxes:
-            # 이름은 금액보다 왼쪽에 있어야 함
             if nb["cx"] >= ab["cx"]:
                 continue
 
-            # 같은 줄 우선
             y_diff = abs(nb["cy"] - ab["cy"])
             if y_diff > max(nb["h"], ab["h"]) * 1.3:
                 continue
 
-            # 거리 가까운 것 우선
             x_gap = ab["x1"] - nb["x2"]
             if x_gap < -10:
                 continue
@@ -236,7 +249,12 @@ def pair_names_and_amounts(
             continue
 
         raw_name = normalize_text(best_name["text"])
-        official_name = fuzzy_match_name(raw_name, key_to_official, official_names, score_cutoff=58)
+        official_name = fuzzy_match_name(
+            raw_name,
+            key_to_official,
+            official_names,
+            score_cutoff=58,
+        )
         amount = parse_amount(ab["text"])
 
         if official_name is None or amount is None:
@@ -248,19 +266,15 @@ def pair_names_and_amounts(
                 "종목명": official_name,
                 "금액": amount,
                 "name_y": best_name["cy"],
-                "amount_y": ab["cy"],
             }
         )
 
-    # 같은 종목 중복 인식 시 금액이 가장 큰 것 우선
     if not pairs:
         return []
 
     temp_df = pd.DataFrame(pairs)
     temp_df = temp_df.sort_values(["종목명", "금액"], ascending=[True, False])
     temp_df = temp_df.drop_duplicates(subset=["종목명"], keep="first")
-
-    # 화면 순서대로 정렬
     temp_df = temp_df.sort_values("name_y").reset_index(drop=True)
 
     return temp_df.to_dict(orient="records")
@@ -271,32 +285,47 @@ def classify_with_rules(extracted_df: pd.DataFrame, rules_df: pd.DataFrame) -> p
     return merged
 
 
+def format_currency(x: int) -> str:
+    return f"{int(x):,}원"
+
+
 def make_pie_chart(df: pd.DataFrame, label_col: str, value_col: str, title: str):
     if df.empty:
         st.info(f"{title}: 표시할 데이터가 없습니다.")
         return
 
-    fig, ax = plt.subplots(figsize=(7, 7))
-    ax.pie(df[value_col], labels=df[label_col], autopct="%1.1f%%")
-    ax.set_title(title)
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    pie_kwargs = {
+        "x": df[value_col],
+        "labels": df[label_col],
+        "autopct": "%1.1f%%",
+    }
+
+    if font_prop is not None:
+        pie_kwargs["textprops"] = {"fontproperties": font_prop, "fontsize": 11}
+
+    ax.pie(**pie_kwargs)
+
+    if font_prop is not None:
+        ax.set_title(title, fontproperties=font_prop, fontsize=18)
+    else:
+        ax.set_title(title, fontsize=18)
+
     st.pyplot(fig)
 
 
-def format_currency(x: int) -> str:
-    return f"{int(x):,}원"
-
-
-# -----------------------------
+# =========================
 # UI
-# -----------------------------
+# =========================
 st.title("토스 포트폴리오 자동 분석")
-st.write("토스 보유종목 캡처 이미지를 올리면 종목명, 금액, 분류를 자동 정리합니다.")
+st.write("토스 보유 종목 캡처 이미지를 올리면 종목명, 금액, 분류를 자동 정리합니다.")
 
 rules_df = load_rules()
 reader = load_ocr_reader()
 key_to_official, official_names = prepare_name_lookup(rules_df)
 
-with st.expander("현재 rules.csv에 등록된 종목 보기", expanded=False):
+with st.expander("rules.csv 확인", expanded=False):
     st.dataframe(rules_df, use_container_width=True)
 
 uploaded_file = st.file_uploader(
@@ -318,7 +347,12 @@ if uploaded_file is not None:
             boxes = ocr_boxes_from_image(reader, pil_img)
             name_boxes = find_candidate_name_boxes(boxes)
             amount_boxes = find_candidate_amount_boxes(boxes)
-            paired = pair_names_and_amounts(name_boxes, amount_boxes, key_to_official, official_names)
+            paired = pair_names_and_amounts(
+                name_boxes,
+                amount_boxes,
+                key_to_official,
+                official_names,
+            )
 
         st.subheader("OCR 상태")
         st.write(f"인식된 텍스트 박스 수: {len(boxes)}")
@@ -330,21 +364,22 @@ if uploaded_file is not None:
         extracted_df = pd.DataFrame(paired)[["종목명", "금액", "raw_name"]]
         result_df = classify_with_rules(extracted_df, rules_df)
 
-        # 금액 기준 정렬
         result_df = result_df.sort_values("금액", ascending=False).reset_index(drop=True)
         result_df["비중(%)"] = (result_df["금액"] / result_df["금액"].sum() * 100).round(2)
 
         total_amount = int(result_df["금액"].sum())
         total_count = result_df["종목명"].nunique()
+        unclassified_count = int(result_df["최종분류"].isna().sum())
 
         c1, c2, c3 = st.columns(3)
         c1.metric("총 종목 수", total_count)
         c2.metric("총 금액", format_currency(total_amount))
-        c3.metric("미분류 수", int(result_df["최종분류"].isna().sum()))
+        c3.metric("미분류 수", unclassified_count)
 
         st.subheader("자동 정리 결과")
         show_df = result_df.copy()
         show_df["금액"] = show_df["금액"].apply(format_currency)
+
         st.dataframe(
             show_df[["종목명", "금액", "자산유형", "지역", "최종분류", "비중(%)", "raw_name"]],
             use_container_width=True
@@ -363,13 +398,14 @@ if uploaded_file is not None:
 
         with tab1:
             top_df = result_df.copy()
-            # 종목이 너무 많으면 상위 15개만 표시
+
             if len(top_df) > 15:
                 top15 = top_df.nlargest(15, "금액")[["종목명", "금액"]].copy()
-                others = pd.DataFrame(
-                    [{"종목명": "기타", "금액": top_df.iloc[15:]["금액"].sum()}]
+                others_sum = top_df.iloc[15:]["금액"].sum()
+                pie_df = pd.concat(
+                    [top15, pd.DataFrame([{"종목명": "기타", "금액": others_sum}])],
+                    ignore_index=True
                 )
-                pie_df = pd.concat([top15, others], ignore_index=True)
             else:
                 pie_df = top_df[["종목명", "금액"]].copy()
 
@@ -396,7 +432,7 @@ if uploaded_file is not None:
 
         st.subheader("분류별 합계")
         summary_df = (
-            result_df.groupby(["최종분류"], dropna=False)["금액"]
+            result_df.groupby("최종분류", dropna=False)["금액"]
             .sum()
             .reset_index()
             .sort_values("금액", ascending=False)
